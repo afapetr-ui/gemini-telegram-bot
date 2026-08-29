@@ -119,11 +119,31 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("gemini-bot")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
-generation_config = types.GenerateContentConfig(
-    system_instruction=SYSTEM_INSTRUCTION,
-    thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET),
-    tools=[types.Tool(google_search=types.GoogleSearch())],
+# Поиск Google сидит на отдельной квоте. Если она кончилась, отвечаем без него.
+search_available = True
+SYSTEM_INSTRUCTION_NO_SEARCH = (
+    "Ты полезный ассистент в Telegram. Отвечай по-русски, коротко и по делу, "
+    "без вводных вроде «конечно» и «отличный вопрос». Не используй Markdown-разметку. "
+    "Тебе могут прислать фото, документы, таблицы, голос и видео. Читай вложения, "
+    "считай по ним, извлекай факты и выполняй задание из подписи. "
+    "Поиск в интернете сейчас недоступен из-за квоты. Не выдумывай свежие новости."
 )
+
+
+def build_generation_config(use_search: bool) -> types.GenerateContentConfig:
+    tools = [types.Tool(google_search=types.GoogleSearch())] if use_search else None
+    return types.GenerateContentConfig(
+        system_instruction=SYSTEM_INSTRUCTION if use_search else SYSTEM_INSTRUCTION_NO_SEARCH,
+        thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET),
+        tools=tools,
+    )
+
+
+def is_quota_error(error: Exception) -> bool:
+    text = str(error)
+    return "RESOURCE_EXHAUSTED" in text or "429" in text
+
+
 histories: Dict[int, List[types.Content]] = {}
 # Последние вложения чата — чтобы уточнения без нового файла всё ещё видели документ.
 stored_files: Dict[int, List["AttachedFile"]] = {}
@@ -333,6 +353,7 @@ async def reply_with_gemini(
     new_files: List[AttachedFile],
 ) -> None:
     chat_id = message.chat_id
+    global search_available
     if new_files:
         remember_files(chat_id, new_files)
     files_for_model = new_files or stored_files.get(chat_id, [])
@@ -369,16 +390,28 @@ async def reply_with_gemini(
 
     typing_task = asyncio.create_task(keep_typing(context.bot, chat_id))
     try:
-        response = await client.aio.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=history,
-            config=generation_config,
-        )
+        try:
+            response = await client.aio.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=history,
+                config=build_generation_config(search_available),
+            )
+        except Exception as error:
+            if search_available and is_quota_error(error):
+                log.warning("Квота поиска Google кончилась, отвечаю без интернета")
+                search_available = False
+                response = await client.aio.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=history,
+                    config=build_generation_config(False),
+                )
+            else:
+                raise
         answer = (response.text or "").strip()
     except Exception as error:
         log.exception("Ошибка запроса к Gemini")
         history.pop()
-        if "RESOURCE_EXHAUSTED" in str(error) or "429" in str(error):
+        if is_quota_error(error):
             await message.reply_text(
                 "У Gemini закончилась бесплатная квота на сегодня. Завтра заработает снова."
             )
