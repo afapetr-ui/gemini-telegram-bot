@@ -1,0 +1,6 @@
+# webhooks добавляет tornado — на нём поднимается веб-сервер для приёма апдейтов
+python-telegram-bot[webhooks]==21.11.1
+google-genai==1.33.0
+python-dotenv==1.1.1
+# cryptography 49+ больше не собирает колёса под macOS x86_64, а сборка из исходников требует OpenSSL и Rust
+cryptography<49
