@@ -29,7 +29,10 @@ THINKING_BUDGET = int(os.environ.get("THINKING_BUDGET", "-1"))
 SYSTEM_INSTRUCTION = os.environ.get(
     "SYSTEM_INSTRUCTION",
     "Ты полезный ассистент в Telegram. Отвечай по-русски, коротко и по делу, "
-    "без вводных вроде «конечно» и «отличный вопрос». Не используй Markdown-разметку.",
+    "без вводных вроде «конечно» и «отличный вопрос». Не используй Markdown-разметку. "
+    "Если спрашивают новости, цены, погоду, события или факты, которые могли измениться, "
+    "ищи в интернете. Не говори, что у тебя нет доступа в сеть: поиск у тебя есть. "
+    "Источники указывай обычным текстом, без ссылок в разметке.",
 ).strip()
 
 # Сколько последних реплик держим в памяти на чат (пары «вопрос-ответ» = 2 реплики).
@@ -58,6 +61,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 generation_config = types.GenerateContentConfig(
     system_instruction=SYSTEM_INSTRUCTION,
     thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET),
+    tools=[types.Tool(google_search=types.GoogleSearch())],
 )
 histories: Dict[int, List[types.Content]] = {}
 
@@ -102,10 +106,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             config=generation_config,
         )
         answer = (response.text or "").strip()
-    except Exception:
+    except Exception as error:
         log.exception("Ошибка запроса к Gemini")
         history.pop()
-        await update.message.reply_text("Не получилось получить ответ от Gemini. Попробуй ещё раз.")
+        if "RESOURCE_EXHAUSTED" in str(error) or "429" in str(error):
+            await update.message.reply_text(
+                "У Gemini закончилась бесплатная квота на сегодня. Завтра заработает снова."
+            )
+        else:
+            await update.message.reply_text(
+                "Не получилось получить ответ от Gemini. Попробуй ещё раз."
+            )
         return
 
     if not answer:
